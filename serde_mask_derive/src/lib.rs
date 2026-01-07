@@ -3,12 +3,14 @@ use quote::{format_ident, quote};
 use syn::{DeriveInput, ItemStruct};
 use syn::{parse_macro_input, parse_quote};
 
+/// Attribute macro to prepare a struct for anonymization.
+/// This macro generates an internal state struct to hold anonymized data.
+/// Fields marked with #[anon] will be included in the state struct.
+/// State is stored in a OnceLock for thread-safe lazy initialization at serialization.
 #[proc_macro_attribute]
 pub fn anonymize(_args: TokenStream, input: TokenStream) -> proc_macro::TokenStream {
     let ast = parse_macro_input!(input as ItemStruct);
-    expand_anonymize(ast)
-        .unwrap_or_else(|e| e.to_compile_error().into())
-        .into()
+    expand_anonymize(ast).unwrap_or_else(|e| e.to_compile_error().into())
 }
 
 #[derive(Default)]
@@ -28,10 +30,10 @@ fn parse_serde_attr(field: &syn::Field) -> SerdeConfig {
 
         let _ = attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("rename") {
-                if let Ok(value) = meta.value() {
-                    if let Ok(lit) = value.parse::<syn::LitStr>() {
-                        config.rename = Some(lit.value());
-                    }
+                if let Ok(value) = meta.value()
+                    && let Ok(lit) = value.parse::<syn::LitStr>()
+                {
+                    config.rename = Some(lit.value());
                 }
             } else if meta.path.is_ident("skip") {
                 config.skip = true;
@@ -93,13 +95,14 @@ fn expand_anonymize(mut ast: ItemStruct) -> syn::Result<proc_macro::TokenStream>
     Ok(result.into())
 }
 
+/// Derive macro for Anonymize, which itself implements serde::Serialize
+/// for the struct, implements anonymization and deanonymization logic.
+/// Fields marked with #[anon] will be anonymized during serialization.
+/// Derive macro supports most common serde attributes like rename and skip.
 #[proc_macro_derive(Anonymize, attributes(anon, serde))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
-
-    return expand_macro(ast)
-        .unwrap_or_else(|e| e.to_compile_error().into())
-        .into();
+    expand_macro(ast).unwrap_or_else(|e| e.to_compile_error().into())
 }
 
 fn inner_state(fields_named: &syn::FieldsNamed) -> Option<syn::Field> {
@@ -108,11 +111,7 @@ fn inner_state(fields_named: &syn::FieldsNamed) -> Option<syn::Field> {
         .iter()
         .find(|f| {
             if let Some(ident) = &f.ident {
-                if ident.to_string().starts_with("__state") {
-                    true
-                } else {
-                    false
-                }
+                ident.to_string().starts_with("__state")
             } else {
                 false
             }
@@ -121,20 +120,19 @@ fn inner_state(fields_named: &syn::FieldsNamed) -> Option<syn::Field> {
 }
 
 fn filter_serde_attrs(field: &syn::Field) -> bool {
-    if let Some(field_name) = &field.ident {
-        if field_name.to_string().starts_with("__state") {
-            return true;
-        }
-    }
+    let is_state_field = field
+        .ident
+        .as_ref()
+        .map(|id| id.to_string().starts_with("__state"))
+        .unwrap_or(false);
 
-    // Parse serde attributes
-    let serde_config = parse_serde_attr(field);
-
-    // Skip if marked with #[serde(skip)] or #[serde(skip_serializing)]
-    if serde_config.skip || serde_config.skip_serializing {
+    if is_state_field {
         return true;
     }
-    return false;
+
+    let serde_config = parse_serde_attr(field);
+
+    serde_config.skip || serde_config.skip_serializing
 }
 
 fn serialize_field(field: &syn::Field, is_anon: bool) -> syn::Result<proc_macro2::TokenStream> {
@@ -166,101 +164,92 @@ fn expand_macro(ast: DeriveInput) -> syn::Result<proc_macro::TokenStream> {
     let name = &ast.ident;
     let generics = ast.generics.clone();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    match &ast.data {
-        syn::Data::Struct(data_struct) => {
-            if let syn::Fields::Named(fields_named) = &data_struct.fields {
-                if let Some(_state_field) = inner_state(fields_named) {
-                    let filtered_fields = fields_named
-                        .named
-                        .iter()
-                        .filter(|f| !filter_serde_attrs(f))
-                        .collect::<Vec<_>>();
+    if let syn::Data::Struct(data_struct) = &ast.data
+        && let syn::Fields::Named(fields_named) = &data_struct.fields
+        && let Some(_state_field) = inner_state(fields_named)
+    {
+        let filtered_fields = fields_named
+            .named
+            .iter()
+            .filter(|f| !filter_serde_attrs(f))
+            .collect::<Vec<_>>();
 
-                    let field_serializers = filtered_fields
-                        .iter()
-                        .map(|f| {
-                            serialize_field(
-                                &f,
-                                f.attrs.iter().any(|attr| attr.path().is_ident("anon")),
-                            )
-                        })
-                        .collect::<syn::Result<Vec<_>>>()?;
+        let field_serializers = filtered_fields
+            .iter()
+            .map(|f| serialize_field(f, f.attrs.iter().any(|attr| attr.path().is_ident("anon"))))
+            .collect::<syn::Result<Vec<_>>>()?;
 
-                    let field_count = filtered_fields
-                        .iter()
-                        .filter(|f| {
-                            !f.ident
-                                .as_ref()
-                                .expect("only named fields supported")
-                                .to_string()
-                                .starts_with("__state")
-                        })
-                        .count();
-                    let state_name = format_ident!("__state_{}", name);
+        let field_count = filtered_fields
+            .iter()
+            .filter(|f| {
+                !f.ident
+                    .as_ref()
+                    .expect("only named fields supported")
+                    .to_string()
+                    .starts_with("__state")
+            })
+            .count();
+        let state_name = format_ident!("__state_{}", name);
 
-                    let anon_fields = filtered_fields
-                        .iter()
-                        .filter(|f| f.attrs.iter().any(|attr| attr.path().is_ident("anon")))
-                        .collect::<Vec<_>>();
+        let anon_fields = filtered_fields
+            .iter()
+            .filter(|f| f.attrs.iter().any(|attr| attr.path().is_ident("anon")))
+            .collect::<Vec<_>>();
 
-                    let deanonymize_impls = anon_fields
-                        .iter()
-                        .map(|f| {
-                            let fname = &f.ident;
-                            quote! {
-                                text = self.#fname.deanonymize(__state_ref.#fname.clone(), &text);
-                            }
-                        })
-                        .collect::<Vec<_>>();
+        let deanonymize_impls = anon_fields
+            .iter()
+            .map(|f| {
+                let fname = &f.ident;
+                quote! {
+                    text = self.#fname.deanonymize(__state_ref.#fname.clone(), &text);
+                }
+            })
+            .collect::<Vec<_>>();
 
-                    let deanonymize = quote! {
-                        pub fn deanonymize(&self, mut text: String) -> String {
-                            let __state_ref = &self.__state.get().unwrap();
-                            #(#deanonymize_impls)*
-                            text
-                        }
-                    };
+        let deanonymize = quote! {
+            pub fn deanonymize(&self, mut text: String) -> String {
+                let __state_ref = &self.__state.get().unwrap();
+                #(#deanonymize_impls)*
+                text
+            }
+        };
 
-                    let inner_state_fields = anon_fields.iter().map(|f| {
-                        let fname = &f.ident;
-                        quote! {
-                            #fname: self.#fname.anonymize()
-                        }
-                    });
+        let inner_state_fields = anon_fields.iter().map(|f| {
+            let fname = &f.ident;
+            quote! {
+                #fname: self.#fname.anonymize()
+            }
+        });
 
-                    let serialize = quote! {
-                        use serde::ser::SerializeStruct;
-                        impl #impl_generics serde::Serialize for #name #ty_generics #where_clause {
-                            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                            where
-                                S: serde::Serializer,
-                            {
-                                let mut state = serializer.serialize_struct(stringify!(#name), #field_count)?;
-                                let anon = self.anonymize();
-                                #(#field_serializers)*
-                                state.end()
-                            }
-                        }
-
-                        impl #impl_generics #name #ty_generics #where_clause {
-                            pub fn anonymize(&self) -> &#state_name {
-                                let mut state = self.__state.get_or_init(||{
-                                    let mut state = #state_name {
-                                        #(#inner_state_fields),*
-                                    };
-                                    state
-                                });
-                                state
-                            }
-
-                            #deanonymize
-                        }
-                    };
-                    return Ok(serialize.into());
+        let serialize = quote! {
+            use serde::ser::SerializeStruct;
+            impl #impl_generics serde::Serialize for #name #ty_generics #where_clause {
+                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                where
+                    S: serde::Serializer,
+                {
+                    let mut state = serializer.serialize_struct(stringify!(#name), #field_count)?;
+                    let anon = self.anonymize();
+                    #(#field_serializers)*
+                    state.end()
                 }
             }
-        }
-        _ => {}
+
+            impl #impl_generics #name #ty_generics #where_clause {
+                pub fn anonymize(&self) -> &#state_name {
+                    let mut state = self.__state.get_or_init(||{
+                        let mut state = #state_name {
+                            #(#inner_state_fields),*
+                        };
+                        state
+                    });
+                    state
+                }
+
+                #deanonymize
+            }
+        };
+        return Ok(serialize.into());
     }
 
     Ok(TokenStream::new())

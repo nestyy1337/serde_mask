@@ -2,6 +2,11 @@
 name = "serde_mask_derive"
 version = "0.1.0"
 edition = "2024"
+description.workspace = true
+keywords.workspace = true
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
 
 
 [lib]

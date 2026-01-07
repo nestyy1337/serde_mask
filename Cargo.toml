@@ -7,3 +7,13 @@ members = [
 default-members = [
     "serde_mask",
 ]
+
+[workspace.package]
+name = "serde_mask"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Mask sensitive data during serde serialization for LLM ingestion"
+repository = "https://github.com/nestyy1337/serde_mask"
+keywords = ["serde", "anonymize", "llm", "mask", "secret"]
+categories = ["encoding"]
