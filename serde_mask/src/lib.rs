@@ -1,3 +1,5 @@
+extern crate self as serde_mask;
+
 pub use serde_mask_derive::{Anonymize, anonymize};
 use std::collections::HashMap;
 
@@ -24,6 +26,8 @@ macro_rules! impl_anonymize_for_int {
 
                 fn deanonymize(&self, state: Self::State, serialized: &str) -> String {
                     let replace = [self.to_string()];
+                    //TODO: Don't need to recreate AhoCorasick every time, but deanonymization
+                    // would require storing all the states first, then performing replacements in one go.
                     let ac = aho_corasick::AhoCorasick::new([state]).expect("failed to create AhoCorasick");
                     ac.replace_all(serialized, &replace)
                 }

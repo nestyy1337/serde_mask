@@ -54,7 +54,7 @@ fn expand_anonymize(mut ast: ItemStruct) -> syn::Result<proc_macro::TokenStream>
         .filter_map(|f| {
             if f.attrs.iter().any(|attr| attr.path().is_ident("anon")) {
                 let field_ty = &f.ty;
-                let state_ty = parse_quote! { <#field_ty as AnonymizeTrait>::State };
+                let state_ty = parse_quote! { <#field_ty as serde_mask::AnonymizeTrait>::State };
                 let field = syn::Field {
                     attrs: vec![],
                     vis: f.vis.clone(),
@@ -207,7 +207,8 @@ fn expand_macro(ast: DeriveInput) -> syn::Result<proc_macro::TokenStream> {
             .collect::<Vec<_>>();
 
         let deanonymize = quote! {
-            pub fn deanonymize(&self, mut text: String) -> String {
+            pub fn deanonymize(&self, mut text: ::std::string::String) -> ::std::string::String {
+                use serde_mask::AnonymizeTrait as _;
                 let __state_ref = &self.__state.get().unwrap();
                 #(#deanonymize_impls)*
                 text
@@ -222,12 +223,12 @@ fn expand_macro(ast: DeriveInput) -> syn::Result<proc_macro::TokenStream> {
         });
 
         let serialize = quote! {
-            use serde::ser::SerializeStruct;
             impl #impl_generics serde::Serialize for #name #ty_generics #where_clause {
-                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
                 where
                     S: serde::Serializer,
                 {
+                    use serde::ser::SerializeStruct as _;
                     let mut state = serializer.serialize_struct(stringify!(#name), #field_count)?;
                     let anon = self.anonymize();
                     #(#field_serializers)*
