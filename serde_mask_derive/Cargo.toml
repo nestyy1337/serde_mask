@@ -13,7 +13,6 @@ license.workspace = true
 proc-macro = true
 
 [dependencies]
-fastrand = "2.3.0"
 proc-macro2 = "1.0.103"
 quote = "1.0.42"
 syn = { version = "2.0.111", features = ["extra-traits", "full"] }
